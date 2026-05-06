@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Novant Student Compliance Processor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; background: #f4f6f8; color: #222; padding: 2rem; }
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 0.25rem; }
+  .subtitle { color: #555; font-size: 0.9rem; margin-bottom: 2rem; }
+
+  #drop-zone {
+    border: 2px dashed #aaa;
+    border-radius: 8px;
+    background: #fff;
+    padding: 3rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  #drop-zone.drag-over { border-color: #1a6db5; background: #eef5fc; }
+  #drop-zone p { color: #555; margin-top: 0.5rem; font-size: 0.9rem; }
+  #drop-zone input { display: none; }
+  .drop-icon { font-size: 2.5rem; }
+
+  #status {
+    margin-top: 1.5rem;
+    padding: 1rem 1.25rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    display: none;
+  }
+  #status.info    { background: #e8f0fb; color: #1a4a8a; border: 1px solid #b3cdf5; }
+  #status.success { background: #e6f4ea; color: #1a5c2a; border: 1px solid #9fcfaa; }
+  #status.error   { background: #fce8e8; color: #7a1a1a; border: 1px solid #f5b3b3; }
+
+  #results { margin-top: 1.5rem; display: none; }
+  .summary {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.25rem;
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+  }
+  .stat { text-align: center; }
+  .stat-num { font-size: 2rem; font-weight: 700; }
+  .stat-num.green  { color: #1a7a3a; }
+  .stat-num.orange { color: #c56a00; }
+  .stat-num.gray   { color: #888; }
+  .stat-label { font-size: 0.8rem; color: #666; margin-top: 0.15rem; }
+
+  .btn {
+    display: inline-block;
+    padding: 0.6rem 1.25rem;
+    border-radius: 6px;
+    border: none;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-right: 0.75rem;
+    margin-top: 0.5rem;
+  }
+  .btn-green  { background: #1a7a3a; color: #fff; }
+  .btn-orange { background: #c56a00; color: #fff; }
+  .btn:hover { opacity: 0.88; }
+  .btn:disabled { opacity: 0.4; cursor: default; }
+</style>
+</head>
+<body>
+
+<h1>Novant Student Compliance Processor - 2025 Edition</h1>
+<p class="subtitle">Drop a StudentComplianceView report to generate the Ready and Incomplete student lists.</p>
+
+<div id="drop-zone">
+  <div class="drop-icon">📂</div>
+  <strong>Drop your Excel file here</strong>
+  <p>or click to browse</p>
+  <input type="file" id="file-input" accept=".xlsx,.xls">
+</div>
+
+<div id="status"></div>
+<div id="results">
+  <div class="summary">
+    <div class="stat"><div class="stat-num green" id="cnt-ready">0</div><div class="stat-label">Ready for Corp ID</div></div>
+    <div class="stat"><div class="stat-num orange" id="cnt-incomplete">0</div><div class="stat-label">Incomplete</div></div>
+    <div class="stat"><div class="stat-num gray" id="cnt-excluded">0</div><div class="stat-label">Already have Corp ID</div></div>
+  </div>
+  <button class="btn btn-green" id="btn-ready" disabled>⬇ Download Ready List</button>
+  <button class="btn btn-orange" id="btn-incomplete" disabled>⬇ Download Incomplete List</button>
+</div>
+
+<script>
+// ── Column indices (0-based) ─────────────────────────────────────────────────
+// Source sheet headers are on rows 3 & 4 (0-based: rows 2 & 3), data from row 5 (index 4).
+// Column letters → 0-based index helper
+function col(letter) {
+  let n = 0;
+  for (let c of letter.toUpperCase()) n = n * 26 + c.charCodeAt(0) - 64;
+  return n - 1;
+}
+
+const COL = {
+  A: col('A'), B: col('B'), C: col('C'),   // merged group cols
+  D: col('D'),                               // Student "Last, First Middle"
+  E: col('E'),                               // Email
+  F: col('F'),                               // Phone
+  G: col('G'),                               // Facility
+  L: col('L'),                               // Rotation Start
+  M: col('M'),                               // Rotation End
+  N: col('N'),                               // Program
+  S: col('S'),                               // DOB
+  U: col('U'),                               // Graduation Date
+  X: col('X'),                               // Last 4 SSN
+  AA: col('AA'),                             // Corp ID
+  AD: col('AD'),                             // NH Dept# (shifted from AC in 2025 format)
+};
+
+// Yellow columns that must ALL be filled (row 3 yellows + row 4 yellows)
+const YELLOW_COLS = [
+  col('D'), col('E'), col('F'), col('G'), col('L'), col('N'), // row 3 yellows
+  col('Q'), col('S'), col('T'), col('U'), col('V'),
+  col('W'), col('X'), col('Y'), col('AB'), col('AC'), col('AF'),
+  col('AG'), col('AH'), col('AI'), col('AJ'), col('AK'), col('AL'),
+  col('AM'), col('AN'), col('AO'), col('AP'), col('AQ'), col('AR'),
+  col('AS'), col('AT'), col('AU'), col('AV'),
+];
+
+// ── Name parser ──────────────────────────────────────────────────────────────
+function parseName(raw) {
+  if (!raw) return { first: '', middle: '', last: '' };
+  const commaIdx = String(raw).indexOf(',');
+  if (commaIdx === -1) return { first: String(raw).trim(), middle: '', last: '' };
+  const last  = String(raw).slice(0, commaIdx).trim();
+  const rest  = String(raw).slice(commaIdx + 1).trim().split(/\s+/);
+  const first  = rest[0] || '';
+  const middle = rest.slice(1).join(' ');
+  return { first, middle, last };
+}
+
+// ── Cell value helper ────────────────────────────────────────────────────────
+function val(row, idx) {
+  const v = row[idx];
+  if (v === undefined || v === null) return '';
+  return String(v).trim();
+}
+
+function isEmpty(v) { return v == null || v === ''; }
+
+// ── Date formatting ──────────────────────────────────────────────────────────
+function fmtDate(v) {
+  if (!v) return '';
+  // SheetJS may give serial number for dates
+  if (typeof v === 'number') {
+    const d = XLSX.SSF.parse_date_code(v);
+    return `${d.m}/${d.d}/${d.y}`;
+  }
+  return String(v);
+}
+
+// ── Main processing ──────────────────────────────────────────────────────────
+let readyWB, incompleteWB;
+
+function processFile(file) {
+  setStatus('Reading file...', 'info');
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const wb   = XLSX.read(data, { type: 'array', cellStyles: true, raw: true });
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true });
+
+      // Data starts at row index 4 (0-based), rows 0-3 are title/headers
+      const dataRows = rows.slice(4);
+
+      // ── Step 1: Forward-fill merged cols A, B, C ──────────────────────────
+      let lastA = '', lastB = '', lastC = '';
+      const filled = dataRows.map(row => {
+        const r = [...row];
+        if (!isEmpty(r[COL.A])) lastA = r[COL.A];
+        if (!isEmpty(r[COL.B])) lastB = r[COL.B];
+        if (!isEmpty(r[COL.C])) lastC = r[COL.C];
+        r[COL.A] = lastA;
+        r[COL.B] = lastB;
+        r[COL.C] = lastC;
+        return r;
+      // Skip completely empty rows
+      }).filter(r => r.some(c => !isEmpty(c)));
+
+      // ── Step 2: Find all emails that have ANY Corp ID ─────────────────────
+      const emailsWithCorpId = new Set();
+      for (const row of filled) {
+        const email  = val(row, COL.E).toLowerCase();
+        const corpId = val(row, COL.AA);
+        if (email && !isEmpty(corpId)) emailsWithCorpId.add(email);
+      }
+
+      // ── Step 3: Bucket rows ───────────────────────────────────────────────
+      // De-duplicate: one output row per unique email
+      const seenEmail = new Set();
+      const ready      = [];
+      const incomplete = [];
+      const excluded = emailsWithCorpId.size;
+
+      // Bucket incomplete & ready, one row per email
+      for (const row of filled) {
+        const email = val(row, COL.E).toLowerCase();
+        if (!email) continue;
+        if (emailsWithCorpId.has(email)) continue;  // excluded
+        if (seenEmail.has(email)) continue;          // already processed
+        seenEmail.add(email);
+
+        const missingCols = YELLOW_COLS.filter(idx => isEmpty(val(row, idx)));
+
+        if (missingCols.length === 0) {
+          ready.push(row);
+        } else {
+          incomplete.push({ row, missingCols });
+        }
+      }
+
+      // ── Step 4: Build Ready workbook ─────────────────────────────────────
+      readyWB = buildReadyWorkbook(ready);
+
+      // ── Step 5: Build Incomplete workbook ─────────────────────────────────
+      incompleteWB = buildIncompleteWorkbook(incomplete, rows[2], rows[3]);
+
+      // ── Step 6: Update UI ─────────────────────────────────────────────────
+      document.getElementById('cnt-ready').textContent      = ready.length;
+      document.getElementById('cnt-incomplete').textContent = incomplete.length;
+      document.getElementById('cnt-excluded').textContent   = excluded;
+      document.getElementById('btn-ready').disabled      = ready.length === 0;
+      document.getElementById('btn-incomplete').disabled = incomplete.length === 0;
+      document.getElementById('results').style.display   = 'block';
+
+      setStatus(
+        `Done! ${ready.length} ready, ${incomplete.length} incomplete, ${excluded} already have a Corp ID.`,
+        'success'
+      );
+    } catch (err) {
+      setStatus('Error processing file: ' + err.message, 'error');
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// ── Build Ready output workbook ───────────────────────────────────────────────
+function buildReadyWorkbook(rows) {
+  const headers = [
+    'First Name','Middle Name','Last Name','School',
+    'Rotation Start Date','Rotation End Date','Graduation Date',
+    'Last 4 SSN','DOB','Login Email Address','Phone',
+    'Facility','Program','NH Dept#','NH Corp ID','NH Employee ID#'
+  ];
+
+  const data = [headers];
+  for (const row of rows) {
+    const name = parseName(val(row, COL.D));
+    data.push([
+      name.first,
+      name.middle,
+      name.last,
+      val(row, COL.C),           // School
+      fmtDate(row[COL.L]),       // Rotation Start
+      fmtDate(row[COL.M]),       // Rotation End
+      fmtDate(row[COL.U]),       // Graduation Date
+      val(row, COL.X),           // Last 4 SSN
+      fmtDate(row[COL.S]),       // DOB
+      val(row, COL.E),           // Email
+      val(row, COL.F),           // Phone
+      val(row, COL.G),           // Facility
+      val(row, COL.N),           // Program
+      val(row, COL.AD),          // NH Dept#
+      '',                        // NH Corp ID (blank — to be filled)
+      '',                        // NH Employee ID# (blank — to be filled)
+    ]);
+  }
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(data);
+
+  // Basic column widths
+  ws['!cols'] = headers.map(() => ({ wch: 22 }));
+
+  XLSX.utils.book_append_sheet(wb, ws, 'Ready for Corp ID');
+  return wb;
+}
+
+// ── Build Incomplete output workbook ──────────────────────────────────────────
+function buildIncompleteWorkbook(entries, headerRow3, headerRow4) {
+  // Use the original source headers (rows 3 & 4 merged into one header row)
+  // Build a combined header: prefer row4 sub-header where it exists, else row3
+  const maxCol = Math.max(headerRow3.length, headerRow4.length);
+  const combinedHeader = [];
+  for (let i = 0; i < maxCol; i++) {
+    const h3 = headerRow3[i] ? String(headerRow3[i]) : '';
+    const h4 = headerRow4[i] ? String(headerRow4[i]) : '';
+    combinedHeader.push(h4 || h3 || '');
+  }
+
+  const data = [combinedHeader];
+
+  const redFill = { patternType: 'solid', fgColor: { rgb: 'FFFF0000' } };
+  const missingCells = [];
+
+  for (const { row, missingCols } of entries) {
+    const rowIdx = data.length;
+    data.push(row.map(v => v ?? ''));
+    for (const colIdx of missingCols) missingCells.push([rowIdx, colIdx]);
+  }
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(data);
+
+  for (const [r, c] of missingCells) {
+    const cellAddr = XLSX.utils.encode_cell({ r, c });
+    if (!ws[cellAddr]) ws[cellAddr] = { v: '', t: 's' };
+    ws[cellAddr].s = { fill: redFill };
+  }
+
+  ws['!cols'] = combinedHeader.map(() => ({ wch: 20 }));
+
+  XLSX.utils.book_append_sheet(wb, ws, 'Incomplete');
+  return wb;
+}
+
+// ── UI wiring ─────────────────────────────────────────────────────────────────
+const dropZone  = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) processFile(e.target.files[0]);
+});
+
+dropZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  dropZone.classList.add('drag-over');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) processFile(file);
+});
+
+document.getElementById('btn-ready').addEventListener('click', () => {
+  XLSX.writeFile(readyWB, 'Ready_for_CorpID.xlsx', { cellStyles: true });
+});
+document.getElementById('btn-incomplete').addEventListener('click', () => {
+  XLSX.writeFile(incompleteWB, 'Incomplete_Students.xlsx', { cellStyles: true });
+});
+
+function setStatus(msg, type) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className   = type;
+  el.style.display = 'block';
+}
+</script>
+</body>
+</html>
