@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GCU Slot Utilization Processor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; background: #f4f6f8; color: #222; padding: 2rem; }
+  h1 { font-size: 1.3rem; font-weight: 600; margin-bottom: 0.25rem; }
+  .subtitle { color: #555; font-size: 0.9rem; margin-bottom: 2rem; }
+
+  #drop-zone {
+    border: 2px dashed #aaa;
+    border-radius: 8px;
+    background: #fff;
+    padding: 3rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  #drop-zone.drag-over { border-color: #1a6db5; background: #eef5fc; }
+  #drop-zone p { color: #555; margin-top: 0.5rem; font-size: 0.9rem; }
+  #drop-zone input { display: none; }
+  .drop-icon { font-size: 2.5rem; }
+
+  #status {
+    margin-top: 1.5rem;
+    padding: 1rem 1.25rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    display: none;
+  }
+  #status.info    { background: #e8f0fb; color: #1a4a8a; border: 1px solid #b3cdf5; }
+  #status.success { background: #e6f4ea; color: #1a5c2a; border: 1px solid #9fcfaa; }
+  #status.error   { background: #fce8e8; color: #7a1a1a; border: 1px solid #f5b3b3; }
+
+  #results { margin-top: 1.5rem; display: none; }
+  .summary {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.25rem;
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+  }
+  .stat { text-align: center; }
+  .stat-num { font-size: 2rem; font-weight: 700; }
+  .stat-num.blue  { color: #1a6db5; }
+  .stat-num.green { color: #1a7a3a; }
+  .stat-num.gray  { color: #888; }
+  .stat-label { font-size: 0.8rem; color: #666; margin-top: 0.15rem; }
+
+  .btn {
+    display: inline-block;
+    padding: 0.6rem 1.25rem;
+    border-radius: 6px;
+    border: none;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-right: 0.75rem;
+    margin-top: 0.5rem;
+  }
+  .btn-blue { background: #1a6db5; color: #fff; }
+  .btn:hover { opacity: 0.88; }
+  .btn:disabled { opacity: 0.4; cursor: default; }
+</style>
+</head>
+<body>
+
+<h1>GCU Slot Utilization Processor</h1>
+<p class="subtitle">Drop the GCU source CSV to generate per-school slot utilization reports.</p>
+
+<div id="drop-zone">
+  <div class="drop-icon">📂</div>
+  <strong>Drop your CSV file here</strong>
+  <p>or click to browse</p>
+  <input type="file" id="file-input" accept=".csv">
+</div>
+
+<div id="status"></div>
+<div id="results">
+  <div class="summary">
+    <div class="stat"><div class="stat-num blue"  id="cnt-schools">0</div><div class="stat-label">Schools</div></div>
+    <div class="stat"><div class="stat-num green" id="cnt-used">0</div><div class="stat-label">Slots Utilized</div></div>
+    <div class="stat"><div class="stat-num gray"  id="cnt-total">0</div><div class="stat-label">Total Matched Slots</div></div>
+  </div>
+  <button class="btn btn-blue" id="btn-download" disabled>⬇ Download Utilization Report</button>
+</div>
+
+<script>
+// ── Hardcoded unit filter — per facility (source: units.xlsx, one sheet per facility)
+// Keys match CSV facility names after stripping the "Novant Health " prefix.
+const FACILITY_UNITS = {
+  'New Hanover Regional Medical Center': [
+    '3 North - Neuro-Medical', '4 North - Neuro Surgical',
+    '5 North - Neuro Step-Down & Stroke', 'Cardiac I (Card/Med/Tele)',
+    'Cardiac II (Card/Med/Surg/Tele)',
+    'CF - 2nd floor Med-Surg & 3RD floor orthopedics',
+    'Medicine I (Med/ Hospitalist)', 'Medicine II (COVID/Med/Hospitalist)',
+    'Medicine III (Med/Hospitalist)', 'Medicine IV (Med/Hospitalist)',
+    'NHRMC Rehab Hospital - Inpatient Unit', 'PCU (Progressive Care Unit)',
+    'Surgical I (Adult Inpatient Surgery Unit)', 'CCU (Coronary Care Unit)',
+    'CVICU', 'MICU', 'STICU', 'Neuro ICU', 'Coronary Observation Unit',
+    'Cardiac Cath Lab/EP Lab', 'NH Emergency Department',
+    'OH (Ortho) Emergency Department', "Scott's Hill Emergency Department",
+    'Surgical II (Med/Surg/Neuro)',
+    'Family Care Center\n(formerly Mother Baby)',
+    'High Risk Antepartum/LDR/OR', 'Pediatrics/PICU',
+    'Neonatal Services (NICU)', 'NH Same Day Surgery',
+    'Cape Fear Ambulatory Surgery', 'NH PACU', 'CF PACU',
+    'NH Operating Room', 'CF Operating Room', 'CVOR',
+    'Zimmer Cancer Center', 'OB Clinic',
+    'Pediatric Specialty Clinics - Azalea at Autumn Hall',
+    'Pediatric Specialty Clinics - Infusion Clinic at CWC',
+    'Medical Mall', 'Outpatient Services', "Women's",
+    'NHRMC Rehab Hospital - Outpatient Facilities',
+    'Behavioral Health Hospital (BHH)',
+    'Behavioral Health Hospital (BHH) - B Pod in ED',
+    'Endoscopy', 'VAT - CF/NHRMC', 'Special Procedures Radiology',
+    'ASC Atlantic Surgical  Center',
+  ],
+  'Brunswick Medical Center': [
+    '3rd Floor Special Care Unit', '3rd Floor (PCU)', '2nd Floor Med surg',
+    'ED', 'Family Care Unit\n(formerly 3rd Floor Womens Services)', 'OR',
+  ],
+  'Pender Medical Center': [
+    '1W/Swing', 'ED', 'Surgery',
+  ],
+  'Presbyterian Medical Center': [
+    '4A - Pulmonary Progressive Care',
+    '4C - Gastrointestinal/Renal', '4C Gastrointestinal/Renal', // both spellings
+    '3rd – ICU', '6F - Stroke/Neuro', '5F - Cardiac Telemetry',
+    '5C - Cardiac Intermediate', '5A - PCTU', '6th Floor - CCU',
+    '6A - Intermediate ICU', '6C- Neuro Intermediate',
+    '6D - Behavioral Health General Adult', '3A - Surgical/Neurovascular',
+    "7C - Women's Care", "7D - Adult Behavioral Health",
+    '7E - Adult Intensive Management', '7E-BH Child & Adolescent',
+    '7F - Hemo/Onc', '8th floor - High Risk Special',
+    'Family Care Unit\n(formerly 8th Mother/Baby)',
+    'Birthing Care', 'NSICU', 'NICU', 'Pediatrics 2A - Hemby',
+    'PICU - Hemby', 'Adult ED/BHED', 'Peds ED',
+    'Operating Room - ACU (preop/Phasell d/c)', 'Operating Room -PACU',
+    'Endoscopy Suite', 'Observation Unit',
+    "St. Jude Affiliate Clinic at Novant Hemby Children's Hospital",
+  ],
+  'Huntersville Medical Center': [
+    'Med - Surg I', 'Med - Surg II', 'Surgical Services',
+    'Family Care Unit\n(formerly Maternity)',
+    'ICU/IMCU', 'CICCU', 'ED', 'Endoscopy Suite',
+  ],
+  'Mint Hill Medical Center': [
+    'Med-Surg\n(formerly Med - Surg II)', 'SCU\n(formerly SCU-MS2)',
+    'Emergency', 'Family Care Unit\n(formerly Womens)',
+  ],
+  'Matthews Medical Center': [
+    '3rd Medical Cardiology', '4th Med/Surg', 'ED', 'ICCU', 'ICU',
+    'Inpatient OR', 'Endoscopy Suite', 'NICU',
+    'Family Care Center\n(formerly 2nd floor Maternity Center)',
+  ],
+  'Charlotte Orthopedic Hospital': [
+    '3SW Gastrointestinal', 'Orthopedic Specialty Care Unit - 4SW',
+    'Orthopedic Specialty Care Unit B - 3rd floor', 'PACU', 'Operating Room',
+  ],
+  'Forsyth Medical Center': [
+    '2nd Annex & 9 East', '2nd General', '3rd West  - NICU', '4th General',
+    'Labor & Delivery - 4th North', '5th General',
+    'Cardiac pre/post unit - CPPU', '5th West 2', 'CICU 5th North',
+    '6th East', '6th General', "6 North Women's Unit", '6th West I',
+    '6th West 2', '2 South Surgical (formerlly Surgery)',
+    'Family Care Center\n(formely 7 North Mother-Baby)',
+    '7th West Neurosciences', 'Renal and Limb Preservation - 8th General',
+    'Palliative -  8th North', '8 Pulmonary', '3 West (formerly 9th General)',
+    '9th North', 'Oncology - 9 West', '1st floor ICCU',
+    'Medical ICU\n(formerly ICU 1, 2, & 3)',
+    'NSICU (Neuroscience and Surgical ICU) \n(formerly Neuro ICU)',
+    'ED', 'OR- Main 1st floor', 'Outpatient 1st floor', 'PACU 1st floor',
+    'Womens Center OR', 'Endoscopy Suite',
+    'Emergency Observation Unit (EOU)', 'Clinical Decision Unit (CDU)',
+    'Cardiovasular ICU (CVICU)',
+  ],
+  'Kernersville Medical Center': [
+    '2nd Floor Med surg', '3rd Floor Med- Surg', '2nd Floor  ICU/IMU',
+    'ED', 'Operating Room', 'Birth Center',
+  ],
+  'Clemmons Medical Center': [
+    'Med/Surg - CMC', 'ED - CMC', 'OR - CMC', 'PACU - CMC',
+  ],
+  'Rowan Medical Center': [
+    'B1A Linn-Geriatric', 'B2A Lifeworks Adult', 'B1E IMU', 'A2A Surgical',
+    'A2C  Joynt Camp', 'B2E Stanback Rehab', 'B3A East', 'B3A West',
+    'B4A  (CTU)', 'B4E (PCTU)', 'Interventional Radiology',
+    'Surgical Services', 'Pre/Post - PACU', 'Endoscopy Suite', 'Emergency',
+    'A3A Family Care Center', 'A3C Labor/Delivery', 'CCU', 'Radiology',
+  ],
+  'Thomasville Medical Center': [
+    '4th Floor BH', '2nd Floor total Joint Center', '3rd Floor Med- Surg',
+    'ICU/ICC', 'Surgical Services', 'ED',
+    'Family Care Unit\n(formerly 2nd Floor Womens Center)',
+  ],
+  'Medical Park Hospital': [
+    'MPH OR', 'MPH Pre-Op', 'MPH PACU I', 'MPH PACU II', 'MPH 3rd floor',
+  ],
+};
+
+// Strip "\n..." suffix, normalize whitespace, lowercase — handles xlsx verbose names vs short CSV names.
+function normalizeUnit(s) {
+  return String(s).split('\n')[0].replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+const FACILITY_UNITS_NORM = Object.fromEntries(
+  Object.entries(FACILITY_UNITS).map(([fac, units]) => [fac, new Set(units.map(normalizeUnit))])
+);
+
+const DAY_ORDER = {
+  Monday: 0, Tuesday: 1, Wednesday: 2, Thursday: 3,
+  Friday: 4, Saturday: 5, Sunday: 6,
+};
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function getSemester(raw) {
+  const m = String(raw ?? '').match(/^(\d{4})-(\d{2})/);
+  if (!m) return '';
+  const year  = parseInt(m[1]) % 100;
+  const month = parseInt(m[2]);
+  const season = month <= 5 ? 'Spring' : month <= 7 ? 'Summer' : 'Fall';
+  return `${season} ${year}`;
+}
+
+function semesterSortKey(sem) {
+  const [season, yr] = sem.split(' ');
+  return parseInt(yr) * 3 + ({ Spring: 0, Summer: 1, Fall: 2 }[season] ?? 0);
+}
+
+function cleanFacility(raw) {
+  return String(raw ?? '').replace(/^Novant Health\s+/, '').trim();
+}
+
+// ── Main processing ────────────────────────────────────────────────────────
+let outputWB = null;
+
+function processFile(file) {
+  setStatus('Reading file...', 'info');
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = new Uint8Array(e.target.result);
+      const wb   = XLSX.read(data, { type: 'array', raw: true });
+      const ws   = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+
+      const groups     = new Map();
+      let totalMatched = 0;
+      let totalUsed    = 0;
+
+      for (const row of rows.slice(1)) {
+        const unit     = String(row[7] ?? '').trim();
+        const facility = cleanFacility(row[4]);
+        const allowed  = FACILITY_UNITS_NORM[facility];
+        if (!allowed || !allowed.has(normalizeUnit(unit))) continue;
+
+        const semester = getSemester(row[1]);
+        const univ     = String(row[8] ?? '').trim();
+        if (!semester || !univ) continue;
+
+        const day   = String(row[2] ?? '').trim();
+        const shift = String(row[3] ?? '').trim();
+        const student  = String(row[11] ?? '').trim();
+        const key      = [univ, semester, facility, unit, day, shift].join('\x00');
+
+        if (!groups.has(key)) {
+          groups.set(key, { univ, semester, facility, unit, day, shift, total: 0, used: 0 });
+        }
+        const g = groups.get(key);
+        g.total++;
+        totalMatched++;
+        if (student) { g.used++; totalUsed++; }
+      }
+
+      // Organize by university
+      const byUniv = new Map();
+      for (const g of groups.values()) {
+        if (!byUniv.has(g.univ)) byUniv.set(g.univ, []);
+        byUniv.get(g.univ).push(g);
+      }
+
+      // Sort groups within each university: semester → facility → unit → day
+      for (const gs of byUniv.values()) {
+        gs.sort((a, b) => {
+          const sd = semesterSortKey(a.semester) - semesterSortKey(b.semester);
+          if (sd !== 0) return sd;
+          const fd = a.facility.localeCompare(b.facility);
+          if (fd !== 0) return fd;
+          const ud = a.unit.localeCompare(b.unit);
+          if (ud !== 0) return ud;
+          return (DAY_ORDER[a.day] ?? 99) - (DAY_ORDER[b.day] ?? 99);
+        });
+      }
+
+      outputWB = buildWorkbook(byUniv);
+
+      document.getElementById('cnt-schools').textContent = byUniv.size;
+      document.getElementById('cnt-used').textContent    = totalUsed;
+      document.getElementById('cnt-total').textContent   = totalMatched;
+      document.getElementById('btn-download').disabled   = byUniv.size === 0;
+      document.getElementById('results').style.display   = 'block';
+      setStatus(
+        `Done! ${byUniv.size} schools — ${totalUsed} of ${totalMatched} matched slots utilized.`,
+        'success'
+      );
+    } catch (err) {
+      setStatus('Error processing file: ' + err.message, 'error');
+      console.error(err);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// ── Build output workbook ──────────────────────────────────────────────────
+const HEADERS    = ['School', 'Semester/Year', 'Facility', 'Unit', 'Day', 'Shift', 'Utilized', 'Slots Utilized', 'Utilization %', 'Over 50%?'];
+const COL_WIDTHS = [28, 13, 32, 34, 12, 14, 10, 14, 14, 10];
+const FILL_YES   = { patternType: 'solid', fgColor: { rgb: 'FF00B050' } };
+const FILL_NO    = { patternType: 'solid', fgColor: { rgb: 'FFFFFF00' } };
+
+function buildWorkbook(byUniv) {
+  const wb        = XLSX.utils.book_new();
+  const usedNames = new Set();
+
+  for (const univ of [...byUniv.keys()].sort()) {
+    const groups    = byUniv.get(univ);
+    const data      = [HEADERS];
+    const cellFills = [];
+
+    let prevSem = null, prevFac = null, prevUnit = null;
+
+    for (const g of groups) {
+      // Blank separator rows between semesters
+      if (prevSem !== null && g.semester !== prevSem) {
+        data.push(Array(HEADERS.length).fill(''));
+        data.push(Array(HEADERS.length).fill(''));
+        prevFac  = null;
+        prevUnit = null;
+      }
+
+      const isNewSem  = g.semester !== prevSem;
+      const isNewFac  = g.facility !== prevFac;
+      const isNewUnit = isNewFac || g.unit !== prevUnit;
+      const rowIdx    = data.length;
+
+      const pct = g.total > 0 ? Math.round(g.used / g.total * 100) : 0;
+      data.push([
+        isNewSem  ? univ       : '',
+        isNewSem  ? g.semester : '',
+        isNewFac  ? g.facility : '',
+        isNewUnit ? g.unit     : '',
+        g.day,
+        g.shift,
+        g.used > 0 ? 'Yes' : 'No',
+        `${g.used}/${g.total}`,
+        `${pct}%`,
+        pct > 50 ? 'Y' : 'N',
+      ]);
+
+      cellFills.push({ r: rowIdx, c: 6, fill: g.used > 0 ? FILL_YES : FILL_NO });
+
+      prevSem  = g.semester;
+      prevFac  = g.facility;
+      prevUnit = g.unit;
+    }
+
+    const ws = XLSX.utils.aoa_to_sheet(data);
+
+    for (const { r, c, fill } of cellFills) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+      ws[addr].s = { fill };
+    }
+
+    ws['!cols'] = COL_WIDTHS.map(w => ({ wch: w }));
+
+    // Sheet name: Excel limit is 31 chars; deduplicate if needed
+    let name = univ.slice(0, 31);
+    if (usedNames.has(name)) {
+      let i = 2;
+      while (usedNames.has(`${univ.slice(0, 29)}${i}`)) i++;
+      name = `${univ.slice(0, 29)}${i}`;
+    }
+    usedNames.add(name);
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  }
+
+  return wb;
+}
+
+// ── UI wiring ─────────────────────────────────────────────────────────────
+const dropZone  = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('click', e => { if (e.target !== fileInput) fileInput.click(); });
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) processFile(e.target.files[0]);
+});
+
+dropZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  dropZone.classList.add('drag-over');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) processFile(file);
+});
+
+document.getElementById('btn-download').addEventListener('click', () => {
+  XLSX.writeFile(outputWB, 'GCU_Utilization_Report.xlsx', { cellStyles: true });
+});
+
+function setStatus(msg, type) {
+  const el = document.getElementById('status');
+  el.textContent   = msg;
+  el.className     = type;
+  el.style.display = 'block';
+}
+</script>
+</body>
+</html>
